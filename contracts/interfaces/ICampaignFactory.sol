@@ -2,5 +2,9 @@
 pragma solidity 0.8.15;
 
 interface ICampaignFactory {
-    function createCampaign(address implement_, uint minContribution_) external
+    error Factory__InvalidInput();
+
+    event CampaignDeployed(address indexed clone, address indexed owner);
+
+    function createCampaign(address implement_) external returns (address);
 }

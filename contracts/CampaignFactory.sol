@@ -3,18 +3,34 @@ pragma solidity 0.8.15;
 
 import "@openzeppelin/contracts/proxy/Clones.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/utils/Context.sol";
 
+import "./interfaces/ICampaign.sol";
 import "./interfaces/ICampaignFactory.sol";
 
-contract CampaignFactory is ICampaignFactory {
-    using Counters for Counters.Counter;
+contract CampaignFactory is ICampaignFactory, Context {
     using Clones for address;
+    using Counters for Counters.Counter;
 
-    uint256 private _counter;
+    Counters.Counter private _counter;
     mapping(uint256 => address) public deployedCampaigns;
 
-    function createCampaign(address implement_, uint minContribution_) external {
-        address clone = implement_.clone();
-        deployedCampaigns[_counter.increment()] = clone;
+    constructor() payable {}
+
+    function createCampaign(address implement_)
+        external
+        override
+        returns (address clone)
+    {
+        if (ICampaign(implement_).factory() != address(this)) {
+            revert Factory__InvalidInput();
+        }
+        address sender = _msgSender();
+        clone = implement_.clone();
+        ICampaign(clone).init(sender);
+        deployedCampaigns[_counter.current()] = clone;
+        _counter.increment();
+
+        emit CampaignDeployed(clone, sender);
     }
 }

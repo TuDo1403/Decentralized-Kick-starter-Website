@@ -1,80 +1,134 @@
 // SPDX-License-Identifier: Unlicensed
 pragma solidity 0.8.15;
 
-import "./interfaces/ICampaign.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 
-contract Campaign is ICampaign, Ownable, ReentrancyGuard {
+import "./interfaces/ICampaign.sol";
+
+contract Campaign is ICampaign, Ownable, Pausable, Initializable {
+    using Counters for Counters.Counter;
+
+    address public immutable factory;
     uint256 public immutable minContribution;
 
-    uint256 public approversCount;
-    uint256 private _requestCount;
+    uint256 public numApprovers;
 
-    mapping(uint => Request) public requests;
+    Counters.Counter private _requestCount;
+
     mapping(address => bool) public approvers;
+    mapping(uint256 => Request) public requests;
+    mapping(uint256 => mapping(address => bool)) public approvalsPerRequest;
 
-    constructor(uint256 _minContribution) payable Ownable() ReentrancyGuard() {
-        minContribution = _minContribution;
+    constructor(address factory_, uint256 minContribution_) payable {
+        _nonZeroAddress(factory_);
+        _nonZeroValue(minContribution_);
+
+        factory = factory_;
+        minContribution = minContribution_;
     }
 
-    function contribute() external payable nonReentrant {
-        address sender = _msgSender();
-        require(sender > minContribution);
-
-        approvers[sender] = true;
-        unchecked {
-            ++approversCount;
+    function contribute() external payable override whenNotPaused {
+        if (msg.value < minContribution) {
+            revert Campaign__InsufficientPayment();
         }
+        unchecked {
+            ++numApprovers;
+        }
+        approvers[_msgSender()] = true;
+    }
+
+    function init(address owner_) external override initializer {
+        if (_msgSender() != factory) {
+            revert Campaign__OnlyFactory();
+        }
+        _transferOwnership(owner_);
+    }
+
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     function createRequest(
-        string calldata description_,
+        address recipient_,
         uint256 value_,
-        address recipient_
-    ) external onlyOwner {
-        unchecked {
-            Request memory request = requests[++_requestCount];
-        }
+        string calldata description_
+    ) external override onlyOwner whenNotPaused {
+        _nonZeroAddress(recipient_);
+        _nonZeroValue(value_);
 
-        request.description = description_;
-        request.value = value_;
-        request.recipient = recipient_;
+        Request memory request = Request({
+            recipient: recipient_,
+            value: value_,
+            approvalsCount: 0
+        });
+        uint256 id = _requestCount.current();
+        requests[id] = request;
+        _requestCount.increment();
+
+        emit NewRequest(id, recipient_, value_, description_);
     }
 
-    function approve(uint256 idx_) external nonReentrant {
+    function approve(uint256 idx_) external override whenNotPaused {
         address sender = _msgSender();
-        Request storage request = requests[idx_];
-
         if (!approvers[sender]) {
             revert Campaign__Unauthorized();
         }
-        if (request.approvals[sender]) {
+        if (approvalsPerRequest[idx_][sender]) {
             revert Campaign__AlreadyApproved();
         }
-
         unchecked {
-            ++request.approvalsCount;
+            ++requests[idx_].approvalsCount;
         }
-
-        request.approvals[sender] = true;
+        approvalsPerRequest[idx_][sender] = true;
     }
 
-    function finalizeRequest(uint256 idx_) external onlyOwner {
-        Request memory request = requests[idx_];
-
-        uint256 _approversCount = approversCount;
-        if (request.approvalsCount < (_approversCount >> 1)) {
-            revert Campaing__NotEnoughVotes();
+    function finalizeRequest(uint256 idx_)
+        external
+        override
+        onlyOwner
+        whenNotPaused
+    {
+        if (idx_ > _requestCount.current()) {
+            revert Campaign__InvalidInput();
         }
-        if (request.isCompleted) {
+        Request memory request = requests[idx_];
+        uint256 requestValue = request.value;
+        if (requestValue == 0) {
             revert Campaign__ALreadyCompleted();
         }
-        (bool ok, ) = payable(request.recipient).call{value: request.value}("");
+        unchecked {
+            if (request.approvalsCount < (numApprovers >> 1)) {
+                revert Campaign__NotEnoughVotes();
+            }
+        }
+
+        (bool ok, ) = payable(request.recipient).call{value: requestValue}("");
         if (!ok) {
             revert Campaign__TransactionFailed();
         }
-        request.isCompleted = true;
+        _removeRequest(idx_);
+        emit RequestCompleted(
+            idx_,
+            request.recipient,
+            requestValue,
+            request.approvalsCount
+        );
+    }
+
+    function resetCounter() external override onlyOwner whenPaused {
+        _requestCount.reset();
+    }
+
+    function removeRequest(uint256 idx_) external onlyOwner whenPaused {
+        _removeRequest(idx_);
+        emit RequestDeleted(idx_);
     }
 
     function getSummary()
@@ -91,9 +145,25 @@ contract Campaign is ICampaign, Ownable, ReentrancyGuard {
         return (
             minContribution,
             address(this).balance,
-            _requestCount,
-            approversCount,
+            _requestCount.current(),
+            numApprovers,
             owner()
         );
+    }
+
+    function _removeRequest(uint256 idx_) internal {
+        delete requests[idx_];
+    }
+
+    function _nonZeroAddress(address addr_) internal pure {
+        if (addr_ == address(0)) {
+            revert Campaign__NonZeroAddress();
+        }
+    }
+
+    function _nonZeroValue(uint256 val_) internal pure {
+        if (val_ == 0) {
+            revert Campaign__NonZeroValue();
+        }
     }
 }
