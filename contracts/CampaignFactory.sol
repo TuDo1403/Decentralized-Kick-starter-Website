@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Unlicensed
-pragma solidity ^0.8.4;
+pragma solidity 0.8.15;
 
-import "./Campaign.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
 
-contract CampaignFactory {
-    address[] public deployedCampaigns;
+import "./interfaces/ICampaignFactory.sol";
 
-    function createCampaign(uint minContribution) public {
-        address campaign = address(new Campaign(minContribution, msg.sender));
-        deployedCampaigns.push(campaign);
-    }
+contract CampaignFactory is ICampaignFactory {
+    using Counters for Counters.Counter;
+    using Clones for address;
 
-    function getDeployedCampaigns() public view returns (address[] memory) {
-        return deployedCampaigns;
+    uint256 private _counter;
+    mapping(uint256 => address) public deployedCampaigns;
+
+    function createCampaign(address implement_, uint minContribution_) external {
+        address clone = implement_.clone();
+        deployedCampaigns[_counter.increment()] = clone;
     }
 }
